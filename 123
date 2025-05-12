@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+from pathlib import Path
+
+script_path = Path("/mnt/data/mythic_full_setup.py")
+
+script_code = """#!/usr/bin/env python3
 
 import os
 import subprocess
@@ -7,14 +11,19 @@ from pathlib import Path
 
 LOGFILE = "/root/mythic_install_log.txt"
 
-def run(command, fail_msg, cwd=None):
+def run(command, fail_msg, cwd=None, retries=1):
     print(f"[+] Running: {command}")
-    result = subprocess.run(command, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    with open(LOGFILE, "a") as log:
-        log.write(result.stdout.decode())
-    if result.returncode != 0:
-        print(f"[!] ERROR: {fail_msg}")
-        sys.exit(1)
+    for attempt in range(retries):
+        result = subprocess.run(command, shell=True, cwd=cwd,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        with open(LOGFILE, "a") as log:
+            log.write(result.stdout.decode())
+        if result.returncode == 0:
+            return
+        else:
+            print(f"[!] Attempt {attempt + 1} failed: {fail_msg}")
+    print(f"[X] All {retries} attempts failed: {fail_msg}")
+    sys.exit(1)
 
 def purge_old():
     print("[*] Purging old Docker/Mythic installations...")
@@ -24,33 +33,32 @@ def purge_old():
 
 def install_deps():
     print("[*] Installing dependencies...")
-    run("apt-get update", "apt update failed")
-    run("apt-get install -y git curl wget unzip gnupg2 software-properties-common python3-pip make lynx w3m", "Dependency install failed")
+    run("apt-get update", "apt update failed", retries=3)
+    run("apt-get install -y git curl wget unzip gnupg2 software-properties-common python3-pip make lynx w3m", "Dependency install failed", retries=3)
 
 def install_docker():
-    print("[*] Installing Docker 20.10.24...")
+    print("[*] Installing latest compatible Docker...")
     run("mkdir -p /etc/apt/keyrings", "Failed to create keyrings dir")
-    run("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg", "Failed to add Docker GPG")
-    run("""echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list""", "Failed to add Docker repo")
+    run("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg", "Failed to add Docker GPG key")
+    run("""echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list""", "Failed to add Docker repo")
     run("apt-get update", "Failed to update with Docker repo")
-    run("apt-get install -y docker-ce=5:20.10.24~3-0~ubuntu-jammy docker-ce-cli=5:20.10.24~3-0~ubuntu-jammy containerd.io docker-compose-plugin docker-buildx-plugin", "Docker install failed")
+    run("apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin", "Docker install failed")
     run("systemctl enable docker && systemctl start docker", "Docker start failed")
 
 def install_mythic():
     print("[*] Installing Mythic...")
     run("git clone https://github.com/its-a-feature/Mythic.git /opt/Mythic", "Failed to clone Mythic")
-    run("pip3 install mythic-cli", "Failed to install mythic-cli")
+    run("pip3 install --upgrade mythic-cli", "Failed to install mythic-cli")
     os.makedirs("/opt/Mythic/ssl", exist_ok=True)
     run("openssl req -newkey rsa:4096 -nodes -keyout /opt/Mythic/ssl/mythic.key -x509 -days 365 -out /opt/Mythic/ssl/mythic.crt -subj \"/C=US/ST=None/L=None/O=Mythic/CN=localhost\"", "Cert creation failed")
-
-    env_vars = """
+    env_vars = '''
 MYTHIC_SERVER_PORT=7443
 MYTHIC_HTTPS=True
 MYTHIC_HTTPS_CERT=/ssl/mythic.crt
 MYTHIC_HTTPS_KEY=/ssl/mythic.key
-""".strip()
+'''.strip()
     with open("/opt/Mythic/.env", "a") as env:
-        env.write(f"\n{env_vars}\n")
+        env.write(f"\\n{env_vars}\\n")
 
 def install_agents_and_profiles():
     print("[*] Installing Agents and C2 Profiles...")
@@ -63,9 +71,9 @@ def install_agents_and_profiles():
         "github", "slack", "dropbox", "twitter"
     ]
     for agent in agents:
-        run(f"mythic-cli install github https://github.com/MythicAgents/{agent}", f"Agent install failed: {agent}", cwd="/opt/Mythic")
+        run(f"mythic-cli install github https://github.com/MythicAgents/{agent}", f"Agent install failed: {agent}", cwd="/opt/Mythic", retries=2)
     for profile in profiles:
-        run(f"mythic-cli install github https://github.com/MythicC2Profiles/{profile}", f"Profile install failed: {profile}", cwd="/opt/Mythic")
+        run(f"mythic-cli install github https://github.com/MythicC2Profiles/{profile}", f"Profile install failed: {profile}", cwd="/opt/Mythic", retries=2)
 
 def download_offensive_tools():
     print("[*] Downloading Offensive Tools...")
@@ -79,7 +87,7 @@ def download_offensive_tools():
     for name, url in tools.items():
         dest = f"/opt/tools/{name}"
         if not Path(dest).exists():
-            run(f"git clone {url} {dest}", f"Failed to clone {name}")
+            run(f"git clone {url} {dest}", f"Failed to clone {name}", retries=2)
 
 def start_mythic():
     print("[*] Starting Mythic...")
@@ -88,8 +96,7 @@ def start_mythic():
 def main():
     print("====== Mythic C2 Auto Installer ======")
     with open(LOGFILE, "w") as log:
-        log.write("====== Mythic Installation Log ======\n")
-
+        log.write("====== Mythic Installation Log ======\\n")
     purge_old()
     install_deps()
     install_docker()
@@ -97,13 +104,17 @@ def main():
     install_agents_and_profiles()
     download_offensive_tools()
     start_mythic()
-
-    print("\n[+] Mythic C2 setup is complete.")
+    print("\\n[+] Mythic C2 setup is complete.")
     print(f"[+] Access web UI via CLI with: lynx https://localhost:7443")
     print(f"[+] Log saved to: {LOGFILE}")
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
-        print("[!] Run this script as root: sudo python3 mythic_setup.py")
+        print("[!] Run this script as root: sudo python3 mythic_full_setup.py")
         sys.exit(1)
     main()
+"""
+
+# Write the file so the user can download
+script_path.write_text(script_code)
+script_path.name
