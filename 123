@@ -1,124 +1,109 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
-set -euo pipefail
-LOGFILE="/root/mythic_install_log.txt"
-exec > >(tee -a "$LOGFILE") 2>&1
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-echo "[+] Starting full Mythic C2 setup on Ubuntu 22.04..."
+LOGFILE = "/root/mythic_install_log.txt"
 
-function check_success {
-    if [ $? -ne 0 ]; then
-        echo "[!] ERROR at step: $1. Check the logs at $LOGFILE"
-        exit 1
-    fi
-}
+def run(command, fail_msg, cwd=None):
+    print(f"[+] Running: {command}")
+    result = subprocess.run(command, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with open(LOGFILE, "a") as log:
+        log.write(result.stdout.decode())
+    if result.returncode != 0:
+        print(f"[!] ERROR: {fail_msg}")
+        sys.exit(1)
 
-echo "[+] Updating system..."
-apt-get update && apt-get upgrade -y
-check_success "System Update"
+def purge_old():
+    print("[*] Purging old Docker/Mythic installations...")
+    run("systemctl stop docker || true", "Could not stop Docker")
+    run("apt-get purge -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin", "Failed to purge Docker")
+    run("rm -rf /opt/Mythic /var/lib/docker /var/lib/containerd ~/.mythic", "Failed to remove old files")
 
-echo "[+] Installing dependencies..."
-apt-get install -y git curl wget unzip apt-transport-https ca-certificates gnupg lsb-release gnupg2 software-properties-common python3 python3-pip make jq lynx w3m
-check_success "Dependency Install"
+def install_deps():
+    print("[*] Installing dependencies...")
+    run("apt-get update", "apt update failed")
+    run("apt-get install -y git curl wget unzip gnupg2 software-properties-common python3-pip make lynx w3m", "Dependency install failed")
 
-echo "[+] Installing Docker (20.10.24)..."
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/docker.gpg
-add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable"
-apt-get update
-apt-get install -y docker-ce=5:20.10.24~3-0~ubuntu-jammy docker-ce-cli=5:20.10.24~3-0~ubuntu-jammy containerd.io docker-buildx-plugin docker-compose-plugin
-check_success "Docker Install"
+def install_docker():
+    print("[*] Installing Docker 20.10.24...")
+    run("mkdir -p /etc/apt/keyrings", "Failed to create keyrings dir")
+    run("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg", "Failed to add Docker GPG")
+    run("""echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list""", "Failed to add Docker repo")
+    run("apt-get update", "Failed to update with Docker repo")
+    run("apt-get install -y docker-ce=5:20.10.24~3-0~ubuntu-jammy docker-ce-cli=5:20.10.24~3-0~ubuntu-jammy containerd.io docker-compose-plugin docker-buildx-plugin", "Docker install failed")
+    run("systemctl enable docker && systemctl start docker", "Docker start failed")
 
-echo "[+] Enabling Docker..."
-systemctl enable docker
-systemctl start docker
+def install_mythic():
+    print("[*] Installing Mythic...")
+    run("git clone https://github.com/its-a-feature/Mythic.git /opt/Mythic", "Failed to clone Mythic")
+    run("pip3 install mythic-cli", "Failed to install mythic-cli")
+    os.makedirs("/opt/Mythic/ssl", exist_ok=True)
+    run("openssl req -newkey rsa:4096 -nodes -keyout /opt/Mythic/ssl/mythic.key -x509 -days 365 -out /opt/Mythic/ssl/mythic.crt -subj \"/C=US/ST=None/L=None/O=Mythic/CN=localhost\"", "Cert creation failed")
 
-echo "[+] Installing Docker Compose v2..."
-ln -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
-docker-compose version
-check_success "Docker Compose Install"
+    env_vars = """
+MYTHIC_SERVER_PORT=7443
+MYTHIC_HTTPS=True
+MYTHIC_HTTPS_CERT=/ssl/mythic.crt
+MYTHIC_HTTPS_KEY=/ssl/mythic.key
+""".strip()
+    with open("/opt/Mythic/.env", "a") as env:
+        env.write(f"\n{env_vars}\n")
 
-echo "[+] Cloning Mythic C2 framework..."
-cd /opt
-git clone https://github.com/its-a-feature/Mythic.git
-check_success "Clone Mythic"
+def install_agents_and_profiles():
+    print("[*] Installing Agents and C2 Profiles...")
+    agents = [
+        "poseidon", "apollo", "athena", "xenon", "apfell", "leviathan", "medusa",
+        "thanatos", "hannibal", "venus", "ghostwriter", "nemesis", "bloodhound", "sliver"
+    ]
+    profiles = [
+        "http", "httpx", "websocket", "dns", "dynamichttp", "smb", "tcp", "discord",
+        "github", "slack", "dropbox", "twitter"
+    ]
+    for agent in agents:
+        run(f"mythic-cli install github https://github.com/MythicAgents/{agent}", f"Agent install failed: {agent}", cwd="/opt/Mythic")
+    for profile in profiles:
+        run(f"mythic-cli install github https://github.com/MythicC2Profiles/{profile}", f"Profile install failed: {profile}", cwd="/opt/Mythic")
 
-cd Mythic
-./install_docker_and_dependencies.sh
-check_success "Mythic Dependencies"
+def download_offensive_tools():
+    print("[*] Downloading Offensive Tools...")
+    tools = {
+        "mimikatz": "https://github.com/gentilkiwi/mimikatz.git",
+        "SharpHound": "https://github.com/BloodHoundAD/SharpHound.git",
+        "Rubeus": "https://github.com/GhostPack/Rubeus.git",
+        "Seatbelt": "https://github.com/GhostPack/Seatbelt.git"
+    }
+    os.makedirs("/opt/tools", exist_ok=True)
+    for name, url in tools.items():
+        dest = f"/opt/tools/{name}"
+        if not Path(dest).exists():
+            run(f"git clone {url} {dest}", f"Failed to clone {name}")
 
-echo "[+] Installing Mythic CLI..."
-pip3 install mythic-cli
-check_success "Mythic CLI Install"
+def start_mythic():
+    print("[*] Starting Mythic...")
+    run("./mythic-cli start", "Mythic failed to start", cwd="/opt/Mythic")
 
-echo "[+] Installing all C2 Profiles..."
-C2_PROFILES=(
-    "http"
-    "httpx"
-    "websocket"
-    "dns"
-    "dynamichttp"
-    "smb"
-    "tcp"
-    "discord"
-    "github"
-    "slack"
-    "dropbox"
-    "twitter"
-)
+def main():
+    print("====== Mythic C2 Auto Installer ======")
+    with open(LOGFILE, "w") as log:
+        log.write("====== Mythic Installation Log ======\n")
 
-for profile in "${C2_PROFILES[@]}"; do
-    mythic-cli install github https://github.com/MythicC2Profiles/$profile || echo "[!] Failed to install profile $profile"
-done
+    purge_old()
+    install_deps()
+    install_docker()
+    install_mythic()
+    install_agents_and_profiles()
+    download_offensive_tools()
+    start_mythic()
 
-echo "[+] Installing all Agents..."
-AGENTS=(
-    "poseidon"
-    "apollo"
-    "athena"
-    "xenon"
-    "apfell"
-    "leviathan"
-    "medusa"
-    "thanatos"
-    "hannibal"
-    "venus"
-    "ghostwriter"
-    "nemesis"
-    "bloodhound"
-    "sliver"
-)
+    print("\n[+] Mythic C2 setup is complete.")
+    print(f"[+] Access web UI via CLI with: lynx https://localhost:7443")
+    print(f"[+] Log saved to: {LOGFILE}")
 
-for agent in "${AGENTS[@]}"; do
-    mythic-cli install github https://github.com/MythicAgents/$agent || echo "[!] Failed to install agent $agent"
-done
-
-echo "[+] Generating self-signed certificate for HTTPS..."
-mkdir -p /opt/Mythic/ssl
-openssl req -newkey rsa:4096 -nodes -keyout /opt/Mythic/ssl/mythic.key -x509 -days 365 -out /opt/Mythic/ssl/mythic.crt -subj "/C=US/ST=None/L=None/O=MythicRedTeam/CN=localhost"
-check_success "Self-Signed Cert"
-
-echo "[+] Editing Mythic environment for HTTPS..."
-sed -i '/MYTHIC_SERVER_PORT/d' .env
-echo "MYTHIC_SERVER_PORT=7443" >> .env
-sed -i '/MYTHIC_HTTPS/d' .env
-echo "MYTHIC_HTTPS=True" >> .env
-echo "MYTHIC_HTTPS_CERT=/ssl/mythic.crt" >> .env
-echo "MYTHIC_HTTPS_KEY=/ssl/mythic.key" >> .env
-
-echo "[+] Starting Mythic..."
-./mythic-cli start
-check_success "Mythic Start"
-
-echo "[+] Downloading offensive tools..."
-mkdir -p /opt/tools && cd /opt/tools
-
-git clone https://github.com/gentilkiwi/mimikatz.git || echo "[!] Failed to clone Mimikatz"
-git clone https://github.com/BloodHoundAD/SharpHound.git || echo "[!] Failed to clone SharpHound"
-git clone https://github.com/r3motecontrol/Ghostpack-CompiledBinaries.git || echo "[!] Failed to clone Ghostpack (Rubeus, Seatbelt, etc.)"
-
-echo "[+] Setup complete."
-echo "============================================"
-echo "Access Mythic C2 via lynx or w3m: https://localhost:7443"
-echo "Run Mythic CLI: cd /opt/Mythic && ./mythic-cli"
-echo "Log file saved to: $LOGFILE"
-echo "============================================"
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print("[!] Run this script as root: sudo python3 mythic_setup.py")
+        sys.exit(1)
+    main()
