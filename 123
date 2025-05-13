@@ -12,10 +12,9 @@ error() {
 
 trap 'error "Script failed at line $LINENO. Exiting."' ERR
 
-# === Clean up any existing installs ===
-log "Cleaning previous Mythic installation and offensive tools..."
-
-sudo rm -rf ~/Mythic ~/mythic-cli ~/.mythic
+# === Clean previous installs ===
+log "Cleaning previous installs..."
+sudo rm -rf ~/Mythic ~/mythic-cli ~/.mythic ~/offensive-tools
 sudo docker system prune -af || true
 sudo apt-get remove -y docker docker.io containerd runc || true
 sudo apt-get autoremove -y || true
@@ -26,50 +25,44 @@ sudo apt-get update -y && sudo apt-get upgrade -y
 
 # === Install dependencies ===
 log "Installing dependencies..."
-
 sudo apt-get install -y \
     curl wget git unzip build-essential \
     apt-transport-https ca-certificates gnupg lsb-release \
-    python3 python3-pip software-properties-common \
-    lynx
+    python3 python3-pip software-properties-common lynx
 
 # === Install Docker ===
 log "Installing Docker and Docker Compose..."
-
 sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
 echo \
-  "deb [arch=$(dpkg --print-architecture) \
-  signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 sudo apt-get update -y
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo usermod -aG docker $USER
+sudo systemctl enable docker
+sudo systemctl start docker
 
-# === Install mythic-cli ===
-log "Installing Mythic CLI..."
-
+# === Install Mythic ===
+log "Installing Mythic..."
 git clone https://github.com/its-a-feature/Mythic ~/Mythic
 cd ~/Mythic
 ./install_docker_ubuntu.sh
 
-# Ensure docker is running
-sudo systemctl enable docker
-sudo systemctl start docker
-
+# === Install mythic-cli ===
 cd ~
-git clone https://github.com/its-a-feature/mythic-cli.git
-cd mythic-cli
+log "Installing mythic-cli..."
+git clone https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
+cd ~/mythic-cli
 pip3 install -r requirements.txt
 echo 'export PATH=$PATH:~/mythic-cli' >> ~/.bashrc
 source ~/.bashrc
 
-# === Install all agents ===
+# === Install Agents ===
+log "Installing Mythic agents..."
 AGENTS=(
   "https://github.com/MythicAgents/poseidon"
   "https://github.com/MythicAgents/apollo"
@@ -85,12 +78,12 @@ AGENTS=(
   "https://github.com/MythicAgents/sliver"
 )
 
-log "Installing Mythic Agents..."
 for AGENT in "${AGENTS[@]}"; do
-    ./mythic-cli install github $AGENT || error "Failed to install $AGENT"
+    mythic-cli install github "$AGENT" || error "Failed to install $AGENT"
 done
 
-# === Install C2 profiles ===
+# === Install C2 Profiles ===
+log "Installing C2 profiles..."
 C2_PROFILES=(
   "http"
   "httpx"
@@ -106,41 +99,41 @@ C2_PROFILES=(
   "twitter"
 )
 
-log "Installing C2 Profiles..."
 for PROFILE in "${C2_PROFILES[@]}"; do
-    ./mythic-cli install c2-profile $PROFILE || error "Failed to install $PROFILE"
+    mythic-cli install c2-profile "$PROFILE" || error "Failed to install $PROFILE"
 done
 
-# === Self-signed HTTPS certificate ===
-log "Generating self-signed HTTPS cert for Mythic (port 7443)..."
+# === HTTPS self-signed cert ===
+log "Creating self-signed HTTPS cert..."
 mkdir -p ~/.mythic/certs
 openssl req -x509 -newkey rsa:4096 -keyout ~/.mythic/certs/key.pem -out ~/.mythic/certs/cert.pem -days 365 -nodes -subj "/CN=localhost"
 
 # === Start Mythic ===
-log "Starting Mythic..."
-cd ~/Mythic
-MYTHIC_SELF_SIGNED_CERT=true ./mythic-cli start
+log "Starting Mythic server..."
+cd ~/mythic-cli
+MYTHIC_SELF_SIGNED_CERT=true mythic-cli start
 
-# === Install offensive tools ===
+# === Download Offensive Tools ===
+log "Downloading offensive tools..."
 mkdir -p ~/offensive-tools
 cd ~/offensive-tools
 
-log "Cloning offensive tools..."
 git clone https://github.com/PowerShellMafia/PowerSploit.git || true
-git clone https://github.com/EmpireProject/Empire.git || true
-git clone https://github.com/BC-SECURITY/Empire || true
+git clone https://github.com/EmpireProject/Empire.git EmpireProject || true
+git clone https://github.com/BC-SECURITY/Empire.git BCEmpire || true
 git clone https://github.com/BloodHoundAD/BloodHound.git || true
 git clone https://github.com/GhostPack/SharpHound.git || true
 git clone https://github.com/GhostPack/Rubeus.git || true
 git clone https://github.com/GhostPack/Seatbelt.git || true
 git clone https://github.com/GhostPack/Certify.git || true
 
-log "Downloading Mimikatz binary..."
+log "Downloading Mimikatz..."
 wget -nc https://github.com/gentilkiwi/mimikatz/releases/latest/download/mimikatz_trunk.zip -O mimikatz.zip || true
 unzip -o mimikatz.zip -d mimikatz || true
 
-# === Final message ===
-log "✅ Mythic C2 is fully installed and running on https://<your-vps-ip>:7443"
-log "Use Lynx to view it: lynx https://<your-vps-ip>:7443"
-log "📦 All offensive tools downloaded to: ~/offensive-tools"
-log "Restart your shell or run 'source ~/.bashrc' to use mythic-cli command"
+# === Done ===
+IP=$(curl -s ifconfig.me || hostname -I | awk '{print $1}')
+log "✅ Mythic is running at: https://$IP:7443"
+log "Use Lynx to view Mythic: lynx https://$IP:7443"
+log "📦 Offensive tools in: ~/offensive-tools"
+log "🔁 Restart shell or 'source ~/.bashrc' to use mythic-cli"
