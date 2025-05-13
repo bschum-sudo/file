@@ -2,68 +2,66 @@
 
 set -euo pipefail
 
-log() {
-    echo -e "\e[94m[+] $1\e[0m"
-}
-
-error() {
-    echo -e "\e[91m[!] $1\e[0m"
-}
+log() { echo -e "\e[94m[+] $1\e[0m"; }
+warn() { echo -e "\e[93m[!] $1\e[0m"; }
+error() { echo -e "\e[91m[✘] $1\e[0m"; }
 
 trap 'error "Script failed at line $LINENO. Exiting."' ERR
 
-# === Clean previous installs ===
+# === CLEANUP ===
 log "Cleaning previous installs..."
-sudo rm -rf ~/Mythic ~/mythic-cli ~/.mythic ~/offensive-tools
+sudo rm -rf ~/Mythic ~/.mythic ~/offensive-tools || true
 sudo docker system prune -af || true
 sudo apt-get remove -y docker docker.io containerd runc || true
 sudo apt-get autoremove -y || true
 
-# === Update system ===
+# === UPDATE SYSTEM ===
 log "Updating system..."
-sudo apt-get update -y && sudo apt-get upgrade -y
+sudo apt-get update -y || warn "Update failed"
+sudo apt-get upgrade -y || warn "Upgrade failed"
 
-# === Install dependencies ===
+# === INSTALL DEPS ===
 log "Installing dependencies..."
 sudo apt-get install -y \
     curl wget git unzip build-essential \
     apt-transport-https ca-certificates gnupg lsb-release \
-    python3 python3-pip software-properties-common lynx
+    python3 python3-pip software-properties-common lynx || error "Dependency install failed"
 
-# === Install Docker ===
-log "Installing Docker and Docker Compose..."
+# === INSTALL DOCKER ===
+log "Installing Docker..."
 sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 sudo apt-get update -y
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo usermod -aG docker $USER
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin
+sudo usermod -aG docker "$USER"
 sudo systemctl enable docker
 sudo systemctl start docker
 
-# === Install Mythic ===
-log "Installing Mythic..."
-sudo env GIT_ASKPASS=true git clone --depth=1 https://github.com/its-a-feature/Mythic.git ~/Mythic
-cd ~/Mythic
-./install_docker_ubuntu.sh
+# === CLONE MYTHIC ===
+log "Cloning Mythic..."
+sudo env GIT_ASKPASS=true git clone --depth=1 https://github.com/its-a-feature/Mythic.git ~/Mythic || error "Mythic clone failed"
+cd ~/Mythic || error "Mythic dir not found"
 
-# === Install mythic-cli ===
-cd ~
-log "Installing mythic-cli..."
-sudo env GIT_ASKPASS=true git clone --depth=1 https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
-cd ~/mythic-cli
-pip3 install -r requirements.txt
-echo 'export PATH=$PATH:~/mythic-cli' >> ~/.bashrc
-source ~/.bashrc
+./install_docker_ubuntu.sh || warn "Docker helper script failed"
 
-# === Install Agents ===
-log "Installing Mythic agents..."
-AGENTS=(
+# === MYTHIC CLI SETUP ===
+log "Setting up mythic-cli..."
+pip3 install -r mythic-cli/requirements.txt || error "mythic-cli pip install failed"
+
+if ! grep -q mythic-cli ~/.bashrc; then
+    echo 'export PATH=$PATH:~/Mythic/mythic-cli' >> ~/.bashrc
+    export PATH=$PATH:~/Mythic/mythic-cli
+fi
+
+# === AGENTS ===
+log "Installing agents..."
+AGENT_URLS=(
   "https://github.com/MythicAgents/poseidon"
   "https://github.com/MythicAgents/apollo"
   "https://github.com/MythicAgents/athena"
@@ -78,62 +76,59 @@ AGENTS=(
   "https://github.com/MythicAgents/sliver"
 )
 
-for AGENT in "${AGENTS[@]}"; do
-    mythic-cli install github "$AGENT" || error "Failed to install $AGENT"
+for url in "${AGENT_URLS[@]}"; do
+  ./mythic-cli/mythic-cli install github "$url" || warn "Agent install failed: $url"
 done
 
-# === Install C2 Profiles ===
+# === C2 PROFILES ===
 log "Installing C2 profiles..."
 C2_PROFILES=(
-  "http"
-  "httpx"
-  "websocket"
-  "dns"
-  "dynamichttp"
-  "smb"
-  "tcp"
-  "discord"
-  "github"
-  "slack"
-  "dropbox"
-  "twitter"
+  "http" "httpx" "websocket" "dns" "dynamichttp"
+  "smb" "tcp" "discord" "github" "slack" "dropbox" "twitter"
 )
 
-for PROFILE in "${C2_PROFILES[@]}"; do
-    mythic-cli install c2-profile "$PROFILE" || error "Failed to install $PROFILE"
+for profile in "${C2_PROFILES[@]}"; do
+  ./mythic-cli/mythic-cli install c2-profile "$profile" || warn "C2 install failed: $profile"
 done
 
-# === HTTPS self-signed cert ===
+# === TLS CERT ===
 log "Creating self-signed HTTPS cert..."
 mkdir -p ~/.mythic/certs
-openssl req -x509 -newkey rsa:4096 -keyout ~/.mythic/certs/key.pem -out ~/.mythic/certs/cert.pem -days 365 -nodes -subj "/CN=localhost"
+openssl req -x509 -newkey rsa:4096 -keyout ~/.mythic/certs/key.pem \
+    -out ~/.mythic/certs/cert.pem -days 365 -nodes -subj "/CN=localhost" || warn "TLS cert failed"
 
-# === Start Mythic ===
-log "Starting Mythic server..."
-cd ~/mythic-cli
-MYTHIC_SELF_SIGNED_CERT=true mythic-cli start
+# === START MYTHIC ===
+log "Starting Mythic..."
+MYTHIC_SELF_SIGNED_CERT=true ./mythic-cli/mythic-cli start || error "Mythic failed to start"
 
-# === Download Offensive Tools ===
-log "Downloading offensive tools..."
+# === OFFENSIVE TOOLS ===
+log "Cloning offensive tools..."
 mkdir -p ~/offensive-tools
 cd ~/offensive-tools
 
-git clone https://github.com/PowerShellMafia/PowerSploit.git || true
-git clone https://github.com/EmpireProject/Empire.git EmpireProject || true
-git clone https://github.com/BC-SECURITY/Empire.git BCEmpire || true
-git clone https://github.com/BloodHoundAD/BloodHound.git || true
-git clone https://github.com/GhostPack/SharpHound.git || true
-git clone https://github.com/GhostPack/Rubeus.git || true
-git clone https://github.com/GhostPack/Seatbelt.git || true
-git clone https://github.com/GhostPack/Certify.git || true
+TOOL_REPOS=(
+  "https://github.com/PowerShellMafia/PowerSploit.git"
+  "https://github.com/EmpireProject/Empire.git"
+  "https://github.com/BC-SECURITY/Empire.git"
+  "https://github.com/BloodHoundAD/BloodHound.git"
+  "https://github.com/GhostPack/SharpHound.git"
+  "https://github.com/GhostPack/Rubeus.git"
+  "https://github.com/GhostPack/Seatbelt.git"
+  "https://github.com/GhostPack/Certify.git"
+)
 
+for repo in "${TOOL_REPOS[@]}"; do
+  sudo env GIT_ASKPASS=true git clone --depth=1 "$repo" || warn "Tool clone failed: $repo"
+done
+
+# === MIMIKATZ ===
 log "Downloading Mimikatz..."
-wget -nc https://github.com/gentilkiwi/mimikatz/releases/latest/download/mimikatz_trunk.zip -O mimikatz.zip || true
-unzip -o mimikatz.zip -d mimikatz || true
+wget -nc https://github.com/gentilkiwi/mimikatz/releases/latest/download/mimikatz_trunk.zip -O mimikatz.zip || warn "Mimikatz download failed"
+unzip -o mimikatz.zip -d mimikatz || warn "Unzip failed"
 
-# === Done ===
+# === FINISH ===
 IP=$(curl -s ifconfig.me || hostname -I | awk '{print $1}')
 log "✅ Mythic is running at: https://$IP:7443"
-log "Use Lynx to view Mythic: lynx https://$IP:7443"
-log "📦 Offensive tools in: ~/offensive-tools"
-log "🔁 Restart shell or 'source ~/.bashrc' to use mythic-cli"
+log "🔁 Use Lynx: lynx https://$IP:7443"
+log "📦 Offensive tools at: ~/offensive-tools"
+log "🧠 Reload CLI: source ~/.bashrc"
