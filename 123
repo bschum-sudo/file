@@ -55,7 +55,7 @@ cd ~/Mythic
 # === Install mythic-cli ===
 cd ~
 log "Installing mythic-cli..."
-git clone https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
+git clone --depth=1 https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
 cd ~/mythic-cli
 pip3 install -r requirements.txt
 echo 'export PATH=$PATH:~/mythic-cli' >> ~/.bashrc
