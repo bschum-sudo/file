@@ -48,14 +48,14 @@ sudo systemctl start docker
 
 # === Install Mythic ===
 log "Installing Mythic..."
-git clone https://github.com/its-a-feature/Mythic ~/Mythic
+GIT_ASKPASS=true git clone --depth=1 https://github.com/its-a-feature/Mythic.git ~/Mythic
 cd ~/Mythic
 ./install_docker_ubuntu.sh
 
 # === Install mythic-cli ===
 cd ~
 log "Installing mythic-cli..."
-git clone --depth=1 https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
+GIT_ASKPASS=true git clone --depth=1 https://github.com/its-a-feature/mythic-cli.git ~/mythic-cli
 cd ~/mythic-cli
 pip3 install -r requirements.txt
 echo 'export PATH=$PATH:~/mythic-cli' >> ~/.bashrc
